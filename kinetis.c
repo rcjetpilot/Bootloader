@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2012-2014 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2018 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,15 +32,68 @@
  ****************************************************************************/
 
 /**
- * @file cdcacm.h
+ * @file kinetis.c
  *
- * cdcacm bootloader definitions.
+ * Kinetis functions.
  */
 
-#pragma once
+#include "kinetis.h"
+
+void systick_interrupt_enable(void)
+{
+	SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
+}
+
+void systick_interrupt_disable(void)
+{
+	SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
+}
+
+void systick_counter_enable(void)
+{
+	SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
+}
+
+void systick_counter_disable(void)
+{
+	SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
+}
+
+void systick_set_reload(uint32_t value)
+{
+	SysTick->LOAD = (value & SysTick_LOAD_RELOAD_Msk);
+}
+
+uint8_t systick_get_countflag(void)
+{
+	return (SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) ? 1 : 0;
+}
+
+void systick_set_clocksource(uint8_t newsrc)
+{
+	SysTick->CTRL = (SysTick->CTRL & ~SysTick_CTRL_CLKSOURCE_Msk) |
+			(newsrc & SysTick_CTRL_CLKSOURCE_Msk);
+}
+
+void flash_unlock(void)
+{
+}
 
 
-extern void usb_cinit(void *pconfig);
-extern void usb_cfini(void);
-extern int usb_cin(void);
-extern void usb_cout(uint8_t *buf, unsigned len);
+void usart_set_baudrate(uint32_t usart, uint32_t baud) {};
+void usart_set_databits(uint32_t usart, int bits) {};
+void usart_set_stopbits(uint32_t usart, int usart_stopbits) {};
+void usart_set_mode(uint32_t usart, int usart_mode) {};
+void usart_set_parity(uint32_t usart, int usart_parity) {};
+void usart_set_flow_control(uint32_t usart, int usart_flowcontrol) {};
+void usart_enable(uint32_t usart) {};
+void usart_disable(uint32_t usart) {};
+
+uint16_t usart_recv(uint32_t usart)
+{
+	return 0;
+}
+
+void usart_send_blocking(uint32_t usart, uint16_t data)
+{
+};

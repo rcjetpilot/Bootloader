@@ -11,6 +11,7 @@
 #include <libopencm3/stm32/flash.h>
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/stm32/pwr.h>
+#include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/systick.h>
 
 #include "bl.h"
@@ -29,13 +30,13 @@
 # define BOARD_INTERFACE_CONFIG		NULL
 #endif
 const struct rcc_clock_scale _rcc_hsi_8mhz = {
-
-	.pll = RCC_CFGR_PLLMUL_PLL_IN_CLK_X16,
 	.pllsrc = RCC_CFGR_PLLSRC_HSI_DIV2,
+	.pllmul = RCC_CFGR_PLLMUL_MUL16,
+	.plldiv = RCC_CFGR2_PREDIV_NODIV,
 	.hpre = RCC_CFGR_HPRE_DIV_NONE,
 	.ppre1 = RCC_CFGR_PPRE1_DIV_2,
 	.ppre2 = RCC_CFGR_PPRE2_DIV_NONE,
-	.flash_config = FLASH_ACR_PRFTBE | FLASH_ACR_LATENCY_2WS,
+	.flash_waitstates = 2,
 	.ahb_frequency	= 64000000,
 	.apb1_frequency = 32000000,
 	.apb2_frequency = 64000000,
@@ -51,6 +52,12 @@ struct boardinfo board_info = {
 };
 
 static void board_init(void);
+
+uint32_t
+board_get_devices(void)
+{
+	return BOOT_DEVICES_SELECTION;
+}
 
 static void
 board_init(void)
@@ -85,12 +92,15 @@ board_init(void)
 
 #ifdef INTERFACE_USART
 	/* configure usart pins */
-	rcc_peripheral_enable_clock(&BOARD_USART_PIN_CLOCK_REGISTER, BOARD_USART_PIN_CLOCK_BIT);
+	rcc_peripheral_enable_clock(&BOARD_USART_PIN_CLOCK_REGISTER, BOARD_USART_PIN_CLOCK_BIT_TX);
+	rcc_peripheral_enable_clock(&BOARD_USART_PIN_CLOCK_REGISTER, BOARD_USART_PIN_CLOCK_BIT_RX);
+
 	/* Setup GPIO pins for USART transmit. */
-	gpio_mode_setup(BOARD_PORT_USART, GPIO_MODE_AF, GPIO_PUPD_PULLUP, BOARD_PIN_TX | BOARD_PIN_RX);
+	gpio_mode_setup(BOARD_PORT_USART_TX, GPIO_MODE_AF, GPIO_PUPD_PULLUP, BOARD_PIN_TX);
+	gpio_mode_setup(BOARD_PORT_USART_RX, GPIO_MODE_AF, GPIO_PUPD_PULLUP, BOARD_PIN_RX);
 	/* Setup USART TX & RX pins as alternate function. */
-	gpio_set_af(BOARD_PORT_USART, BOARD_PORT_USART_AF, BOARD_PIN_TX);
-	gpio_set_af(BOARD_PORT_USART, BOARD_PORT_USART_AF, BOARD_PIN_RX);
+	gpio_set_af(BOARD_PORT_USART_TX, BOARD_PORT_USART_AF_TX, BOARD_PIN_TX);
+	gpio_set_af(BOARD_PORT_USART_RX, BOARD_PORT_USART_AF_RX, BOARD_PIN_RX);
 
 	/* configure USART clock */
 	rcc_peripheral_enable_clock(&BOARD_USART_CLOCK_REGISTER, BOARD_USART_CLOCK_BIT);
@@ -119,7 +129,8 @@ board_deinit(void)
 
 #ifdef INTERFACE_USART
 	/* deinitialise GPIO pins for USART transmit. */
-	gpio_mode_setup(BOARD_PORT_USART, GPIO_MODE_INPUT, GPIO_PUPD_NONE, BOARD_PIN_TX | BOARD_PIN_RX);
+	gpio_mode_setup(BOARD_PORT_USART_TX, GPIO_MODE_INPUT, GPIO_PUPD_NONE, BOARD_PIN_TX);
+	gpio_mode_setup(BOARD_PORT_USART_RX, GPIO_MODE_INPUT, GPIO_PUPD_NONE, BOARD_PIN_RX);
 
 	/* disable USART peripheral clock */
 	rcc_peripheral_disable_clock(&BOARD_USART_CLOCK_REGISTER, BOARD_USART_CLOCK_BIT);
@@ -141,6 +152,22 @@ static inline void
 clock_init(void)
 {
 	rcc_clock_setup_hsi(&_rcc_hsi_8mhz);
+}
+
+inline void arch_systic_init(void)
+{
+	/* (re)start the timer system */
+	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB);
+	systick_set_reload(board_info.systick_mhz * 1000);  /* 1ms tick, magic number */
+	systick_interrupt_enable();
+	systick_counter_enable();
+}
+
+inline void arch_systic_deinit(void)
+{
+	/* kill the systick interrupt */
+	systick_interrupt_disable();
+	systick_counter_disable();
 }
 
 /**
@@ -175,6 +202,21 @@ clock_deinit(void)
 
 	/* Reset the CIR register */
 	RCC_CIR = 0x000000;
+}
+
+inline void arch_flash_lock(void)
+{
+	flash_lock();
+}
+
+inline void arch_flash_unlock(void)
+{
+	flash_unlock();
+}
+
+inline void arch_setvtor(uint32_t address)
+{
+	SCB_VTOR = address;
 }
 
 /*---------------------------------------------------------------------------*/

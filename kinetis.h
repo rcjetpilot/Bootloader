@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2012-2014 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2018 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,15 +32,54 @@
  ****************************************************************************/
 
 /**
- * @file cdcacm.h
+ * @file kinetis.h
  *
- * cdcacm bootloader definitions.
+ * Kinetis definitions.
  */
 
-#pragma once
+#if defined(CPU_MK66FN2M0VMD18)
+#  include "MK66F18.h"
+#endif
+#if !defined(CAT)
+#if !defined(_CAT)
+#define _CAT(a, b) a ## b
+#endif
+#define CAT(a, b) _CAT(a, b)
+#endif
+
+#define KINETIS_UART(l) CAT(UART,l)
+#define KINETIS_CLOCK_UART(l) CAT(kCLOCK_Uart,l)
+
+#define KINETIS_PORT(l) CAT(PORT,l)
+#define KINETIS_CLOCK_PORT(l) CAT(kCLOCK_Port,l)
+#define KINETIS_GPIO(l) CAT(GPIO,l)
+#define KINETIS_MASK(b) (1<<(b))
+
+#define SYSTIC_CLKSOURCE_AHB_DIV8  (0 << SysTick_CTRL_CLKSOURCE_Pos)
+#define SYSTIC_CLKSOURCE_AHB       (1 << SysTick_CTRL_CLKSOURCE_Pos)
+
+void systick_interrupt_enable(void);
+void systick_interrupt_disable(void);
+void systick_counter_enable(void);
+void systick_counter_disable(void);
+void systick_set_reload(uint32_t value);
+uint8_t systick_get_countflag(void);
+void systick_set_clocksource(uint8_t newsrc);
+
+void flash_unlock();
+
+void sys_tick_handler(void);
 
 
-extern void usb_cinit(void *pconfig);
-extern void usb_cfini(void);
-extern int usb_cin(void);
-extern void usb_cout(uint8_t *buf, unsigned len);
+void usart_set_baudrate(uint32_t usart, uint32_t baud);
+void usart_set_databits(uint32_t usart, int bits);
+void usart_set_stopbits(uint32_t usart, int usart_stopbits);
+void usart_set_mode(uint32_t usart, int usart_mode);
+void usart_set_parity(uint32_t usart, int usart_parity);
+void usart_set_flow_control(uint32_t usart, int usart_flowcontrol);
+void usart_enable(uint32_t usart);
+void usart_disable(uint32_t usart);
+
+uint16_t usart_recv(uint32_t usart);
+void usart_send_blocking(uint32_t usart, uint16_t data);
+

@@ -42,13 +42,7 @@
 
 #include <inttypes.h>
 #include <stdlib.h>
-
-# include <libopencm3/stm32/rcc.h>
-# include <libopencm3/stm32/gpio.h>
-# include <libopencm3/stm32/flash.h>
-
-#include <libopencm3/cm3/scb.h>
-#include <libopencm3/cm3/systick.h>
+#include <stdbool.h>
 
 #include "bl.h"
 #include "cdcacm.h"
@@ -80,6 +74,8 @@
 //
 
 #define BL_PROTOCOL_VERSION 		5		// The revision of the bootloader protocol
+//* Next revision needs to update
+
 // protocol bytes
 #define PROTO_INSYNC				0x12    // 'in sync' byte sent before status
 #define PROTO_EOC					0x20    // end of command
@@ -89,6 +85,8 @@
 #define PROTO_FAILED				0x11    // INSYNC/FAILED  - 'fail' response
 #define PROTO_INVALID				0x13	// INSYNC/INVALID - 'invalid' response for bad commands
 #define PROTO_BAD_SILICON_REV 		0x14 	// On the F4 series there is an issue with < Rev 3 silicon
+#define PROTO_RESERVED_0X15     0x15  // Reserved
+
 // see https://pixhawk.org/help/errata
 // Command bytes
 #define PROTO_GET_SYNC				0x21    // NOP for re-establishing sync
@@ -103,6 +101,12 @@
 #define PROTO_GET_CHIP_DES			0x2e    // read chip version In ASCII
 #define PROTO_BOOT					0x30    // boot the application
 #define PROTO_DEBUG					0x31    // emit debug information - format not defined
+#define PROTO_SET_BAUD				0x33    // set baud rate on uart
+
+#define PROTO_RESERVED_0X36     0x36  // Reserved
+#define PROTO_RESERVED_0X37     0x37  // Reserved
+#define PROTO_RESERVED_0X38     0x38  // Reserved
+#define PROTO_RESERVED_0X39     0x39  // Reserved
 
 #define PROTO_PROG_MULTI_MAX    64	// maximum PROG_MULTI size
 #define PROTO_READ_MULTI_MAX    255	// size of the size field
@@ -114,6 +118,35 @@
 #define PROTO_DEVICE_FW_SIZE	4	// size of flashable area
 #define PROTO_DEVICE_VEC_AREA	5	// contents of reserved vectors 7-10
 
+#define STATE_PROTO_OK          0x10    // INSYNC/OK      - 'ok' response
+#define STATE_PROTO_FAILED        0x11    // INSYNC/FAILED  - 'fail' response
+#define STATE_PROTO_INVALID       0x13  // INSYNC/INVALID - 'invalid' response for bad commands
+#define STATE_PROTO_BAD_SILICON_REV     0x14  // On the F4 series there is an issue with < Rev 3 silicon
+#define STATE_PROTO_RESERVED_0X15     0x15  // Reserved
+
+
+// State
+#define STATE_PROTO_GET_SYNC      0x1     // Have Seen NOP for re-establishing sync
+#define STATE_PROTO_GET_DEVICE    0x2     // Have Seen get device ID bytes
+#define STATE_PROTO_CHIP_ERASE    0x4     // Have Seen erase program area and reset program address
+#define STATE_PROTO_PROG_MULTI    0x8     // Have Seen write bytes at program address and increment
+#define STATE_PROTO_GET_CRC       0x10    // Have Seen compute & return a CRC
+#define STATE_PROTO_GET_OTP       0x20    // Have Seen read a byte from OTP at the given address
+#define STATE_PROTO_GET_SN        0x40    // Have Seen read a word from UDID area ( Serial)  at the given address
+#define STATE_PROTO_GET_CHIP      0x80    // Have Seen read chip version (MCU IDCODE)
+#define STATE_PROTO_GET_CHIP_DES  0x100   // Have Seen read chip version In ASCII
+#define STATE_PROTO_BOOT          0x200   // Have Seen boot the application
+
+#if defined(TARGET_HW_PX4_PIO_V1)
+#define STATE_ALLOWS_ERASE        (STATE_PROTO_GET_SYNC)
+#define STATE_ALLOWS_REBOOT       (STATE_PROTO_GET_SYNC)
+#  define SET_BL_STATE(s)
+#else
+#define STATE_ALLOWS_ERASE        (STATE_PROTO_GET_SYNC|STATE_PROTO_GET_DEVICE)
+#define STATE_ALLOWS_REBOOT       (STATE_ALLOWS_ERASE|STATE_PROTO_PROG_MULTI|STATE_PROTO_GET_CRC)
+#  define SET_BL_STATE(s) bl_state |= (s)
+#endif
+
 static uint8_t bl_type;
 static uint8_t last_input;
 
@@ -122,7 +155,7 @@ inline void cinit(void *config, uint8_t interface)
 #if INTERFACE_USB
 
 	if (interface == USB) {
-		return usb_cinit();
+		return usb_cinit(config);
 	}
 
 #endif
@@ -143,11 +176,11 @@ inline void cfini(void)
 	uart_cfini();
 #endif
 }
-inline int cin(void)
+inline int cin(uint32_t devices)
 {
 #if INTERFACE_USB
 
-	if (bl_type == NONE || bl_type == USB) {
+	if ((bl_type == NONE || bl_type == USB) && (devices & USB0_DEV) != 0) {
 		int usb_in = usb_cin();
 
 		if (usb_in >= 0) {
@@ -160,7 +193,7 @@ inline int cin(void)
 
 #if INTERFACE_USART
 
-	if (bl_type == NONE || bl_type == USART) {
+	if ((bl_type == NONE || bl_type == USART) && (devices & SERIAL0_DEV) != 0) {
 		int	uart_in = uart_cin();
 
 		if (uart_in >= 0) {
@@ -192,12 +225,35 @@ inline void cout(uint8_t *buf, unsigned len)
 #endif
 }
 
+/* The PX4IO is so low on FLASH that this abstaction is not possible as
+ * a called API. Therefore these macros are needed.
+ */
+#if defined(TARGET_HW_PX4_PIO_V1)
+# include <libopencm3/stm32/flash.h>
+#include <libopencm3/cm3/systick.h>
+#include <libopencm3/cm3/scb.h>
 
+#define arch_systic_init(d) \
+	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB); \
+	systick_set_reload(board_info.systick_mhz * 1000); \
+	systick_interrupt_enable(); \
+	systick_counter_enable();
+
+#define arch_systic_deinit() \
+	systick_interrupt_disable(); \
+	systick_counter_disable();
+
+#define arch_flash_lock flash_lock
+#define arch_flash_unlock flash_unlock
+
+#define arch_setvtor(address) SCB_VTOR = address;
+
+#endif
 
 static const uint32_t	bl_proto_rev = BL_PROTOCOL_VERSION;	// value returned by PROTO_DEVICE_BL_REV
 
 static unsigned head, tail;
-static uint8_t rx_buf[256];
+static uint8_t rx_buf[256] USB_DATA_ALIGN;
 
 static enum led_state {LED_BLINK, LED_ON, LED_OFF} _led_state;
 
@@ -265,11 +321,10 @@ jump_to_app()
 	}
 
 	/* just for paranoia's sake */
-	flash_lock();
+	arch_flash_lock();
 
 	/* kill the systick interrupt */
-	systick_interrupt_disable();
-	systick_counter_disable();
+	arch_systic_deinit();
 
 	/* deinitialise the interface */
 	cfini();
@@ -281,7 +336,7 @@ jump_to_app()
 	board_deinit();
 
 	/* switch exception handlers to the application */
-	SCB_VTOR = APP_LOAD_ADDRESS;
+	arch_setvtor(APP_LOAD_ADDRESS);
 
 	/* extract the stack and entrypoint from the app vector table and go */
 	do_jump(app_base[0], app_base[1]);
@@ -346,7 +401,7 @@ sync_response(void)
 	cout(data, sizeof(data));
 }
 
-#if defined(TARGET_HW_PX4_FMU_V4)
+#if defined(TARGET_HW_PX4_FMU_V4) || defined(TARGET_HW_UVIFY_CORE)
 static void
 bad_silicon_response(void)
 {
@@ -392,7 +447,7 @@ cin_wait(unsigned timeout)
 	timer[TIMER_CIN] = timeout;
 
 	do {
-		c = cin();
+		c = cin(board_get_devices());
 
 		if (c >= 0) {
 			cin_count++;
@@ -479,15 +534,12 @@ void
 bootloader(unsigned timeout)
 {
 	bl_type = NONE; // The type of the bootloader, whether loading from USB or USART, will be determined by on what port the bootloader recevies its first valid command.
-
+	volatile uint32_t  bl_state = 0; // Must see correct command sequence to erase and reboot (commit first word)
 	uint32_t	address = board_info.fw_size;	/* force erase before upload will work */
 	uint32_t	first_word = 0xffffffff;
 
 	/* (re)start the timer system */
-	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB);
-	systick_set_reload(board_info.systick_mhz * 1000);	/* 1ms tick, magic number */
-	systick_interrupt_enable();
-	systick_counter_enable();
+	arch_systic_init();
 
 	/* if we are working with a timeout, start it running */
 	if (timeout) {
@@ -536,6 +588,7 @@ bootloader(unsigned timeout)
 				goto cmd_bad;
 			}
 
+			SET_BL_STATE(STATE_PROTO_GET_SYNC);
 			break;
 
 		// get device info
@@ -590,6 +643,7 @@ bootloader(unsigned timeout)
 				goto cmd_bad;
 			}
 
+			SET_BL_STATE(STATE_PROTO_GET_DEVICE);
 			break;
 
 		// erase and prepare for programming
@@ -605,25 +659,30 @@ bootloader(unsigned timeout)
 				goto cmd_bad;
 			}
 
-#if defined(TARGET_HW_PX4_FMU_V4)
+#if defined(TARGET_HW_PX4_FMU_V4) || defined(TARGET_HW_UVIFY_CORE)
 
 			if (check_silicon()) {
 				goto bad_silicon;
 			}
 
 #endif
+
+			if ((bl_state & STATE_ALLOWS_ERASE) != STATE_ALLOWS_ERASE) {
+				goto cmd_bad;
+			}
+
 			// clear the bootloader LED while erasing - it stops blinking at random
 			// and that's confusing
 			led_set(LED_ON);
 
 			// erase all sectors
-			flash_unlock();
+			arch_flash_unlock();
 
 			for (int i = 0; flash_func_sector_size(i) != 0; i++) {
 				flash_func_erase_sector(i);
 			}
 
-			// enable the LED while verifying the erase
+			// disable the LED while verifying the erase
 			led_set(LED_OFF);
 
 			// verify the erase
@@ -633,6 +692,7 @@ bootloader(unsigned timeout)
 				}
 
 			address = 0;
+			SET_BL_STATE(STATE_PROTO_CHIP_ERASE);
 
 			// resume blinking
 			led_set(LED_BLINK);
@@ -662,7 +722,7 @@ bootloader(unsigned timeout)
 				goto cmd_bad;
 			}
 
-			if (arg > sizeof(flash_buffer.c)) {
+			if ((unsigned int)arg > sizeof(flash_buffer.c)) {
 				goto cmd_bad;
 			}
 
@@ -682,11 +742,11 @@ bootloader(unsigned timeout)
 
 			if (address == 0) {
 
-#if defined(TARGET_HW_PX4_FMU_V4)
+#if defined(TARGET_HW_PX4_FMU_V4) || defined(TARGET_HW_UVIFY_CORE)
 
-			if (check_silicon()) {
-				goto bad_silicon;
-			}
+				if (check_silicon()) {
+					goto bad_silicon;
+				}
 
 #endif
 
@@ -710,6 +770,8 @@ bootloader(unsigned timeout)
 
 				address += 4;
 			}
+
+			SET_BL_STATE(STATE_PROTO_PROG_MULTI);
 
 			break;
 
@@ -742,6 +804,7 @@ bootloader(unsigned timeout)
 			}
 
 			cout_word(sum);
+			SET_BL_STATE(STATE_PROTO_GET_CRC);
 			break;
 
 		// read a word from the OTP
@@ -784,8 +847,16 @@ bootloader(unsigned timeout)
 					goto cmd_bad;
 				}
 
+				// expect valid indices 0, 4 ...ARCH_SN_MAX_LENGTH-4
+
+				if (index % sizeof(uint32_t) != 0 || index > ARCH_SN_MAX_LENGTH - sizeof(uint32_t)) {
+					goto cmd_bad;
+				}
+
 				cout_word(flash_func_read_sn(index));
 			}
+
+			SET_BL_STATE(STATE_PROTO_GET_SN);
 			break;
 
 		// read the chip ID code
@@ -799,6 +870,7 @@ bootloader(unsigned timeout)
 				}
 
 				cout_word(get_mcu_id());
+				SET_BL_STATE(STATE_PROTO_GET_CHIP);
 			}
 			break;
 
@@ -818,6 +890,7 @@ bootloader(unsigned timeout)
 				len = get_mcu_desc(len, buffer);
 				cout_word(len);
 				cout(buffer, len);
+				SET_BL_STATE(STATE_PROTO_GET_CHIP_DES);
 			}
 			break;
 
@@ -877,6 +950,10 @@ bootloader(unsigned timeout)
 				goto cmd_bad;
 			}
 
+			if (first_word != 0xffffffff && (bl_state & STATE_ALLOWS_REBOOT) != STATE_ALLOWS_REBOOT) {
+				goto cmd_bad;
+			}
+
 			// program the deferred first word
 			if (first_word != 0xffffffff) {
 				flash_func_write_word(0, first_word);
@@ -919,6 +996,7 @@ bootloader(unsigned timeout)
 cmd_bad:
 		// send an 'invalid' response but don't kill the timeout - could be garbage
 		invalid_response();
+		bl_state = 0;
 		continue;
 
 cmd_fail:
@@ -926,7 +1004,7 @@ cmd_fail:
 		failure_response();
 		continue;
 
-#if defined(TARGET_HW_PX4_FMU_V4)
+#if defined(TARGET_HW_PX4_FMU_V4) || defined(TARGET_HW_UVIFY_CORE)
 bad_silicon:
 		// send the bad silicon response but don't kill the timeout - could be garbage
 		bad_silicon_response();

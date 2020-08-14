@@ -36,7 +36,7 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/flash.h>
-#include <libopencm3/stm32/otg_fs.h>
+#include <libopencm3/usb/dwc/otg_fs.h>
 
 #include <libopencm3/cm3/systick.h>
 #include <libopencm3/cm3/nvic.h>
@@ -47,6 +47,13 @@
 #if INTERFACE_USB != 0
 #define USB_CDC_REQ_GET_LINE_CODING			0x21 // Not defined in libopencm3
 
+#ifndef OTG_GOTGCTL_BVALOVAL
+#define OTG_GOTGCTL_BVALOVAL   (1 << 7)
+#endif
+#ifndef OTG_GOTGCTL_BVALOEN
+#define OTG_GOTGCTL_BVALOEN    (1 << 6)
+#endif
+
 /*
  * ST changed the meaning and sense of a few critical bits
  * in the USB IP block identified as 0x00002000
@@ -56,6 +63,11 @@
  */
 #define OTG_CID_HAS_VBDEN 0x00002000
 #define OTG_GCCFG_VBDEN   (1 << 21)
+/*
+ * The B-peripheral session valid override (BVALOVAL and BVALOEN) bits got added
+ * in OTG FS CID 0x00002000
+ */
+#define OTG_CID_HAS_BVALOVAL 0x00002000
 
 /* Provide the stings for the Index 1-n as a requested index of 0 is used for the supported langages
  *  and is hard coded in the usb lib. The array below is indexed by requested index-1, therefore
@@ -75,7 +87,7 @@ static uint8_t usbd_control_buffer[128];
 
 static const struct usb_device_descriptor dev = {
 	.bLength = USB_DT_DEVICE_SIZE,
-	.bDescriptorType = USB_DT_DEVICE,	/**< Specifies he descriptor type */
+	.bDescriptorType = USB_DT_DEVICE,	/**< Specifies the descriptor type */
 	.bcdUSB = 0x0200,					/**< The USB interface version, binary coded (2.0) */
 	.bDeviceClass = USB_CLASS_CDC,		/**< USB device class, CDC in this case */
 	.bDeviceSubClass = 0,
@@ -218,9 +230,9 @@ static const struct usb_cdc_line_coding line_coding = {
 	.bParityType = USB_CDC_NO_PARITY,
 	.bDataBits = 0x08
 };
-
-static int cdcacm_control_request(usbd_device *usbd_dev, struct usb_setup_data *req, uint8_t **buf,
-				  uint16_t *len, void (**complete)(usbd_device *usbd_dev, struct usb_setup_data *req))
+static enum usbd_request_return_codes cdcacm_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
+		uint8_t **buf,
+		uint16_t *len, usbd_control_complete_callback *complete)
 {
 	(void)complete;
 	(void)buf;
@@ -289,7 +301,7 @@ otg_fs_isr(void)
 }
 
 void
-usb_cinit(void)
+usb_cinit(void *pconfig)
 {
 #if defined(STM32F4)
 
@@ -316,6 +328,12 @@ usb_cinit(void)
 
 #if defined(BOARD_USB_VBUS_SENSE_DISABLED)
 	OTG_FS_GCCFG |= OTG_GCCFG_NOVBUSSENS;
+
+	if (OTG_FS_CID == OTG_CID_HAS_BVALOVAL) {
+		/* Force valid B-peripheral session */
+		OTG_FS_GOTGCTL |= OTG_GOTGCTL_BVALOEN | OTG_GOTGCTL_BVALOVAL;
+	}
+
 #endif
 
 	usbd_dev = usbd_init(&otgfs_usb_driver, &dev, &config, usb_strings, NUM_USB_STRINGS,

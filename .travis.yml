@@ -15,9 +15,20 @@ before_script:
   - sudo apt-get install -qq flex bison libncurses5-dev autoconf texinfo build-essential libtool zlib1g-dev genromfs git wget cmake
   - pushd .
   - cd ~
-  - wget https://launchpadlibrarian.net/186124160/gcc-arm-none-eabi-4_8-2014q3-20140805-linux.tar.bz2
-  - tar -jxf gcc-arm-none-eabi-4_8-2014q3-20140805-linux.tar.bz2
-  - exportline="export PATH=$HOME/gcc-arm-none-eabi-4_8-2014q3/bin:\$PATH"
+  - wget https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu-rm/7-2018q2/gcc-arm-none-eabi-7-2018-q2-update-linux.tar.bz2
+  - tar -jxf gcc-arm-none-eabi-7-2018-q2-update-linux.tar.bz2
+  - exportline="export PATH=$HOME/gcc-arm-none-eabi-7-2018-q2-update/bin:\$PATH"
+  - if grep -Fxq "$exportline" ~/.profile; then echo nothing to do ; else echo $exportline >> ~/.profile; fi
+  - . ~/.profile
+  - popd
+# Astyle
+  - pushd .
+  - cd ~
+  - wget https://sourceforge.net/projects/astyle/files/astyle/astyle%202.06/astyle_2.06_linux.tar.gz
+  - tar -xf astyle_2.06_linux.tar.gz
+  - cd astyle/build/gcc
+  - make
+  - exportline="export PATH=$HOME/astyle/build/gcc/bin:\$PATH"
   - if grep -Fxq "$exportline" ~/.profile; then echo nothing to do ; else echo $exportline >> ~/.profile; fi
   - . ~/.profile
   - popd
@@ -43,9 +54,12 @@ script:
   - echo 'Building Bootloader..' && echo -en 'travis_fold:start:script.3\\r'
   - make
   - echo -en 'travis_fold:end:script.3\\r'
-  - echo 'Packaging Bootloader for deployment..' && echo -en 'travis_fold:start:script.4\\r'
-  - make deploy
+  - echo 'Style check..' && echo -en 'travis_fold:start:script.4\\r'
+  - make check_format
   - echo -en 'travis_fold:end:script.4\\r'
+  - echo 'Packaging Bootloader for deployment..' && echo -en 'travis_fold:start:script.5\\r'
+  - make deploy
+  - echo -en 'travis_fold:end:script.5\\r'
   - set +e
 
 deploy:

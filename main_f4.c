@@ -12,7 +12,9 @@
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/cm3/systick.h>
 #include <libopencm3/stm32/pwr.h>
-# include <libopencm3/stm32/timer.h>
+#include <libopencm3/stm32/timer.h>
+#include <libopencm3/cm3/scb.h>
+#include <libopencm3/cm3/systick.h>
 
 #include "bl.h"
 #include "uart.h"
@@ -80,6 +82,14 @@ static struct {
 
 #define REVID_MASK	0xFFFF0000
 #define DEVID_MASK	0xFFF
+
+// A board may disable VBUS sensing, but still provide a (non-standard) VBUS
+// sensing pin (and use it for fast booting when USB is disconnected). If VBUS
+// sensing is enabled, only PA9 can be used.
+#ifndef BOARD_USB_VBUS_SENSE_DISABLED
+# define BOARD_PORT_VBUS                GPIOA
+# define BOARD_PIN_VBUS                 GPIO9
+#endif
 
 /* magic numbers from reference manual */
 
@@ -171,10 +181,13 @@ static const struct rcc_clock_scale clock_setup = {
 	.ppre1 = RCC_CFGR_PPRE_DIV_4,
 	.ppre2 = RCC_CFGR_PPRE_DIV_2,
 	.power_save = 0,
-	.flash_config = FLASH_ACR_ICE | FLASH_ACR_DCE | FLASH_ACR_LATENCY_5WS,
+	.flash_config = FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_LATENCY_5WS,
 	.apb1_frequency = 42000000,
 	.apb2_frequency = 84000000,
 };
+
+/* State of an inserted USB cable */
+static bool usb_connected = false;
 
 static uint32_t
 board_get_rtc_signature()
@@ -293,7 +306,7 @@ board_test_usart_receiving_break()
 	while (cnt < 60) {
 		// Only read pin when SysTick timer is true
 		if (systick_get_countflag() == 1) {
-			if (gpio_get(BOARD_PORT_USART, BOARD_PIN_RX) == 0) {
+			if (gpio_get(BOARD_PORT_USART_RX, BOARD_PIN_RX) == 0) {
 				cnt_consecutive_low++;	// Increment the consecutive low counter
 
 			} else {
@@ -320,18 +333,31 @@ board_test_usart_receiving_break()
 	if (cnt_consecutive_low >= 18) {
 		return true;
 	}
+
 #endif // !defined(SERIAL_BREAK_DETECT_DISABLED)
 
 	return false;
 }
 #endif
 
+uint32_t
+board_get_devices(void)
+{
+	uint32_t devices = BOOT_DEVICES_SELECTION;
+
+	if (usb_connected) {
+		devices &= BOOT_DEVICES_FILTER_ONUSB;
+	}
+
+	return devices;
+}
+
 static void
 board_init(void)
 {
 	/* fix up the max firmware size, we have to read memory to get this */
 	board_info.fw_size = APP_SIZE_MAX;
-#if defined(TARGET_HW_PX4_FMU_V2) || defined(TARGET_HW_PX4_FMU_V4)
+#if defined(TARGET_HW_PX4_FMU_V2) || defined(TARGET_HW_PX4_FMU_V3) || defined(TARGET_HW_PX4_FMU_V4) || defined(TARGET_HW_UVIFY_CORE)
 
 	if (check_silicon() && board_info.fw_size == (2 * 1024 * 1024) - BOOTLOADER_RESERVATION_SIZE) {
 		board_info.fw_size = (1024 * 1024) - BOOTLOADER_RESERVATION_SIZE;
@@ -348,20 +374,23 @@ board_init(void)
 #endif
 
 #if INTERFACE_USB
-
-	/* enable Port A GPIO9 to sample VBUS */
+#if !defined(BOARD_USB_VBUS_SENSE_DISABLED)
+	/* enable configured GPIO to sample VBUS */
 	rcc_peripheral_enable_clock(&RCC_AHB1ENR, RCC_AHB1ENR_IOPAEN);
+#endif
 #endif
 
 #if INTERFACE_USART
 	/* configure USART pins */
-	rcc_peripheral_enable_clock(&BOARD_USART_PIN_CLOCK_REGISTER, BOARD_USART_PIN_CLOCK_BIT);
+	rcc_peripheral_enable_clock(&BOARD_USART_PIN_CLOCK_REGISTER, BOARD_USART_PIN_CLOCK_BIT_TX);
+	rcc_peripheral_enable_clock(&BOARD_USART_PIN_CLOCK_REGISTER, BOARD_USART_PIN_CLOCK_BIT_RX);
 
 	/* Setup GPIO pins for USART transmit. */
-	gpio_mode_setup(BOARD_PORT_USART, GPIO_MODE_AF, GPIO_PUPD_PULLUP, BOARD_PIN_TX | BOARD_PIN_RX);
+	gpio_mode_setup(BOARD_PORT_USART_TX, GPIO_MODE_AF, GPIO_PUPD_PULLUP, BOARD_PIN_TX);
+	gpio_mode_setup(BOARD_PORT_USART_RX, GPIO_MODE_AF, GPIO_PUPD_PULLUP, BOARD_PIN_RX);
 	/* Setup USART TX & RX pins as alternate function. */
-	gpio_set_af(BOARD_PORT_USART, BOARD_PORT_USART_AF, BOARD_PIN_TX);
-	gpio_set_af(BOARD_PORT_USART, BOARD_PORT_USART_AF, BOARD_PIN_RX);
+	gpio_set_af(BOARD_PORT_USART_TX, BOARD_PORT_USART_AF_TX, BOARD_PIN_TX);
+	gpio_set_af(BOARD_PORT_USART_RX, BOARD_PORT_USART_AF_RX, BOARD_PIN_RX);
 
 	/* configure USART clock */
 	rcc_peripheral_enable_clock(&BOARD_USART_CLOCK_REGISTER, BOARD_USART_CLOCK_BIT);
@@ -407,7 +436,8 @@ board_deinit(void)
 
 #if INTERFACE_USART
 	/* deinitialise GPIO pins for USART transmit. */
-	gpio_mode_setup(BOARD_PORT_USART, GPIO_MODE_INPUT, GPIO_PUPD_NONE, BOARD_PIN_TX | BOARD_PIN_RX);
+	gpio_mode_setup(BOARD_PORT_USART_TX, GPIO_MODE_INPUT, GPIO_PUPD_NONE, BOARD_PIN_TX);
+	gpio_mode_setup(BOARD_PORT_USART_RX, GPIO_MODE_INPUT, GPIO_PUPD_NONE, BOARD_PIN_RX);
 
 	/* disable USART peripheral clock */
 	rcc_peripheral_disable_clock(&BOARD_USART_CLOCK_REGISTER, BOARD_USART_CLOCK_BIT);
@@ -457,6 +487,22 @@ clock_init(void)
 	rcc_clock_setup_hse_3v3(&clock_setup);
 }
 
+inline void arch_systic_init(void)
+{
+	/* (re)start the timer system */
+	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB);
+	systick_set_reload(board_info.systick_mhz * 1000);  /* 1ms tick, magic number */
+	systick_interrupt_enable();
+	systick_counter_enable();
+}
+
+inline void arch_systic_deinit(void)
+{
+	/* kill the systick interrupt */
+	systick_interrupt_disable();
+	systick_counter_disable();
+}
+
 /**
   * @brief  Resets the RCC clock configuration to the default reset state.
   * @note   The default reset state of the clock configuration is given below:
@@ -492,6 +538,21 @@ clock_deinit(void)
 
 	/* Reset the CIR register */
 	RCC_CIR = 0x000000;
+}
+
+inline void arch_flash_lock(void)
+{
+	flash_lock();
+}
+
+inline void arch_flash_unlock(void)
+{
+	flash_unlock();
+}
+
+inline void arch_setvtor(uint32_t address)
+{
+	SCB_VTOR = address;
 }
 
 uint32_t
@@ -614,7 +675,7 @@ int get_mcu_desc(int max, uint8_t *revstr)
 
 int check_silicon(void)
 {
-#if defined(TARGET_HW_PX4_FMU_V2) || defined(TARGET_HW_PX4_FMU_V4)
+#if defined(TARGET_HW_PX4_FMU_V2)  || defined(TARGET_HW_PX4_FMU_V3) || defined(TARGET_HW_PX4_FMU_V4) || defined(TARGET_HW_UVIFY_CORE)
 	uint32_t idcode = (*(uint32_t *)DBGMCU_IDCODE);
 	mcu_rev_e revid = (idcode & REVID_MASK) >> 16;
 
@@ -778,14 +839,17 @@ main(void)
 	 * If the force-bootloader pins are tied, we will stay here until they are removed and
 	 * we then time out.
 	 */
-#if defined(BOARD_USB_VBUS_SENSE_DISABLED)
-	try_boot = false;
-#else
-	if (gpio_get(GPIOA, GPIO9) != 0) {
+#if defined(BOARD_PORT_VBUS)
 
+	if (gpio_get(BOARD_PORT_VBUS, BOARD_PIN_VBUS) != 0) {
+		usb_connected = true;
 		/* don't try booting before we set up the bootloader */
 		try_boot = false;
 	}
+
+#else
+	try_boot = false;
+
 #endif
 #endif
 
